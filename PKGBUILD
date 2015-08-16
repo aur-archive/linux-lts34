@@ -1,0 +1,300 @@
+# Maintainer:  fsckd <fsckdaemon -at- gmail dot com>
+# Contributor: Isaac Dupree <antispam@idupree.com>
+# Contributor: Tobias Powalowski <tpowa@archlinux.org>
+# Contributor: Thomas Baechler <thomas@archlinux.org>
+
+pkgname=linux-lts34
+_pkgname=${pkgname}
+_kernelname=${_pkgname#linux}
+_basekernel=3.4
+true && pkgname=(${_pkgname} ${_pkgname}-headers ${_pkgname}-docs)
+pkgver=${_basekernel}.92
+pkgrel=1
+url="http://www.kernel.org/"
+license=('GPL2')
+arch=('i686' 'x86_64')
+makedepends=('xmlto' 'docbook-xsl')
+options=('!strip')
+source=("https://www.kernel.org/pub/linux/kernel/v3.x/linux-3.4.tar.xz"
+        "https://www.kernel.org/pub/linux/kernel/v3.x/patch-${pkgver}.xz"
+        # the main kernel config files
+        'config' 'config.x86_64'
+        # standard config files for mkinitcpio ramdisk
+        "${_pkgname}.preset"
+	'change-default-console-loglevel.patch')
+md5sums=('967f72983655e2479f951195953e8480'
+         'd9433ff38cd191dd86ee7828617f7b0c'
+         'f74a142a45ccf33fc8d6a414dee91c0b'
+         '12360adecc004c8d65bc7aedefda277e'
+         '39f8b9a2e2407afe3c272a78f72b1f62'
+	 '9d3c56a4b999c8bfbd4018089a62f662')
+sha256sums=('ff3dee6a855873d12487a6f4070ec2f7996d073019171361c955639664baa0c6'
+            'b5f7d1bb9c2f161e0bfda63c6248f3d55ae5c87ddf594bd5e7df9fadb1d3c072'
+            '41eb5ae2d6ebc266a3e9f6f7b908566efacb6d5ee0f4ec070bb793eaecb31a3e'
+            'a91483a41e62216d4ae23bae5191997c1916dc7b2e889186cc889878b04cd1bf'
+            'c5467300805ecf202a4b8c91555a98be303e5318c5d938cfa717c5a4514cd13c'
+            'b9d79ca33b0b51ff4f6976b7cd6dbb0b624ebf4fbf440222217f8ffc50445de4')
+
+prepare() {
+  cd "${srcdir}/linux-${_basekernel}"
+
+  # add upstream patch
+  patch -p1 -i "${srcdir}/patch-${pkgver}"
+
+  # add latest fixes from stable queue, if needed
+  # http://git.kernel.org/?p=linux/kernel/git/stable/stable-queue.git
+
+  # set DEFAULT_CONSOLE_LOGLEVEL to 4 (same value as the 'quiet' kernel param)
+  # remove this when a Kconfig knob is made available by upstream
+  # (relevant patch sent upstream: https://lkml.org/lkml/2011/7/26/227)
+  patch -Np1 -i "${srcdir}/change-default-console-loglevel.patch"
+
+  if [ "${CARCH}" = "x86_64" ]; then
+    cat "${srcdir}/config.x86_64" > ./.config
+  else
+    cat "${srcdir}/config" > ./.config
+  fi
+
+  if [ "${_kernelname}" != "" ]; then
+    sed -i "s|CONFIG_LOCALVERSION=.*|CONFIG_LOCALVERSION=\"${_kernelname}\"|g" ./.config
+  fi
+
+  # set extraversion to pkgrel
+  sed -ri "s|^(EXTRAVERSION =).*|\1 -${pkgrel}|" Makefile
+
+  # don't run depmod on 'make install'. We'll do this ourselves in packaging
+  sed -i '2iexit 0' scripts/depmod.sh
+}
+
+build() {
+  cd "${srcdir}/linux-${_basekernel}"
+
+  # get kernel version
+  make prepare
+
+  # load configuration
+  # Configure the kernel. Replace the line below with one of your choice.
+  #make menuconfig # CLI menu for configuration
+  #make nconfig # new CLI menu for configuration
+  #make xconfig # X-based configuration
+  #make oldconfig # using old config from previous kernel version
+  # ... or manually edit .config
+
+  # rewrite configuration
+  yes "" | make config >/dev/null
+
+  # save configuration for later reuse
+  if [ "${CARCH}" = "x86_64" ]; then
+    cat .config > "${startdir}/config.x86_64.last"
+  else
+    cat .config > "${startdir}/config.last"
+  fi
+
+  ####################
+  # stop here
+  # this is useful to configure the kernel
+  #msg "Stopping build"; return 1
+  ####################
+
+  # build!
+  make ${MAKEFLAGS} LOCALVERSION= bzImage modules
+}
+
+package_linux-lts34() {
+  pkgdesc="The ${_pkgname} kernel and modules - 3.4 longterm stable kernel"
+  depends=('coreutils' 'linux-firmware' 'kmod' 'mkinitcpio>=0.7')
+  optdepends=('crda: to set the correct wireless channels of your country')
+  backup=("etc/mkinitcpio.d/${_pkgname}.preset")
+  install=${_pkgname}.install
+
+  cd "${srcdir}/linux-${_basekernel}"
+
+  KARCH=x86
+
+  # get kernel version
+  _kernver="$(make LOCALVERSION= kernelrelease)"
+
+  mkdir -p "${pkgdir}"/{lib/modules,lib/firmware,boot}
+  make LOCALVERSION= INSTALL_MOD_PATH="${pkgdir}" modules_install
+  cp arch/$KARCH/boot/bzImage "${pkgdir}/boot/vmlinuz-${_pkgname}"
+
+  # add vmlinux
+  install -D -m644 vmlinux "${pkgdir}/usr/src/linux-${_kernver}/vmlinux"
+
+  # install fallback mkinitcpio.conf file and preset file for kernel
+  install -D -m644 "${srcdir}/${_pkgname}.preset" "${pkgdir}/etc/mkinitcpio.d/${_pkgname}.preset"
+
+  # set correct depmod command for install
+  sed \
+    -e  "s/KERNEL_NAME=.*/KERNEL_NAME=${_kernelname}/g" \
+    -e  "s/KERNEL_VERSION=.*/KERNEL_VERSION=${_kernver}/g" \
+    -i "${startdir}/${_pkgname}.install"
+  sed \
+    -e "s|ALL_kver=.*|ALL_kver=\"/boot/vmlinuz-${_pkgname}\"|g" \
+    -e "s|default_image=.*|default_image=\"/boot/initramfs-${_pkgname}.img\"|g" \
+    -e "s|fallback_image=.*|fallback_image=\"/boot/initramfs-${_pkgname}-fallback.img\"|g" \
+    -i "${pkgdir}/etc/mkinitcpio.d/${_pkgname}.preset"
+
+  # remove build and source links
+  rm -f "${pkgdir}"/lib/modules/${_kernver}/{source,build}
+  # remove the firmware
+  rm -rf "${pkgdir}/lib/firmware"
+  # gzip -9 all modules to save 100MB of space
+  find "${pkgdir}" -name '*.ko' -exec gzip -9 {} \;
+  # make room for external modules
+  ln -s "../extramodules-${_basekernel}${_kernelname:--ARCH}" "${pkgdir}/lib/modules/${_kernver}/extramodules"
+  # add real version for building modules and running depmod from post_install/upgrade
+  mkdir -p "${pkgdir}/lib/modules/extramodules-${_basekernel}${_kernelname:--ARCH}"
+  echo "${_kernver}" > "${pkgdir}/lib/modules/extramodules-${_basekernel}${_kernelname:--ARCH}/version"
+
+  # Now we call depmod...
+  depmod -b "$pkgdir" -F System.map "$_kernver"
+
+  # move module tree /lib -> /usr/lib
+  mv "$pkgdir/lib" "$pkgdir/usr"
+}
+
+package_linux-lts34-headers() {
+  pkgdesc="Header files and and scripts for building modules for ${_pkgname}"
+
+  install -dm755 "${pkgdir}/usr/lib/modules/${_kernver}"
+
+  cd "${pkgdir}/usr/lib/modules/${_kernver}"
+  ln -sf ../../../src/linux-${_kernver} build
+
+  cd "${srcdir}/linux-${_basekernel}"
+  install -D -m644 Makefile \
+    "${pkgdir}/usr/src/linux-${_kernver}/Makefile"
+  install -D -m644 kernel/Makefile \
+    "${pkgdir}/usr/src/linux-${_kernver}/kernel/Makefile"
+  install -D -m644 .config \
+    "${pkgdir}/usr/src/linux-${_kernver}/.config"
+
+  mkdir -p "${pkgdir}/usr/src/linux-${_kernver}/include"
+
+  for i in acpi asm-generic config crypto drm generated keys linux math-emu \
+    media mtd net pcmcia scsi sound trace video xen; do
+    cp -a include/${i} "${pkgdir}/usr/src/linux-${_kernver}/include/"
+  done
+
+  # copy arch includes for external modules
+  mkdir -p "${pkgdir}/usr/src/linux-${_kernver}/arch/x86"
+  cp -a arch/x86/include "${pkgdir}/usr/src/linux-${_kernver}/arch/x86/"
+
+  # copy files necessary for later builds, like nvidia and vmware
+  cp Module.symvers "${pkgdir}/usr/src/linux-${_kernver}"
+  cp -a scripts "${pkgdir}/usr/src/linux-${_kernver}"
+
+  # fix permissions on scripts dir
+  chmod og-w -R "${pkgdir}/usr/src/linux-${_kernver}/scripts"
+  mkdir -p "${pkgdir}/usr/src/linux-${_kernver}/.tmp_versions"
+
+  mkdir -p "${pkgdir}/usr/src/linux-${_kernver}/arch/${KARCH}/kernel"
+
+  cp arch/${KARCH}/Makefile "${pkgdir}/usr/src/linux-${_kernver}/arch/${KARCH}/"
+
+  if [ "${CARCH}" = "i686" ]; then
+    cp arch/${KARCH}/Makefile_32.cpu "${pkgdir}/usr/src/linux-${_kernver}/arch/${KARCH}/"
+  fi
+
+  cp arch/${KARCH}/kernel/asm-offsets.s "${pkgdir}/usr/src/linux-${_kernver}/arch/${KARCH}/kernel/"
+
+  # add headers for lirc package
+  mkdir -p "${pkgdir}/usr/src/linux-${_kernver}/drivers/media/video"
+
+  cp drivers/media/video/*.h  "${pkgdir}/usr/src/linux-${_kernver}/drivers/media/video/"
+
+  for i in bt8xx cpia2 cx25840 cx88 em28xx et61x251 pwc saa7134 sn9c102; do
+    mkdir -p "${pkgdir}/usr/src/linux-${_kernver}/drivers/media/video/${i}"
+    cp -a drivers/media/video/${i}/*.h "${pkgdir}/usr/src/linux-${_kernver}/drivers/media/video/${i}"
+  done
+
+  # add docbook makefile
+  install -D -m644 Documentation/DocBook/Makefile \
+    "${pkgdir}/usr/src/linux-${_kernver}/Documentation/DocBook/Makefile"
+
+  # add dm headers
+  mkdir -p "${pkgdir}/usr/src/linux-${_kernver}/drivers/md"
+  cp drivers/md/*.h "${pkgdir}/usr/src/linux-${_kernver}/drivers/md"
+
+  # add inotify.h
+  mkdir -p "${pkgdir}/usr/src/linux-${_kernver}/include/linux"
+  cp include/linux/inotify.h "${pkgdir}/usr/src/linux-${_kernver}/include/linux/"
+
+  # add wireless headers
+  mkdir -p "${pkgdir}/usr/src/linux-${_kernver}/net/mac80211/"
+  cp net/mac80211/*.h "${pkgdir}/usr/src/linux-${_kernver}/net/mac80211/"
+
+  # add dvb headers for external modules
+  # in reference to:
+  # http://bugs.archlinux.org/task/9912
+  mkdir -p "${pkgdir}/usr/src/linux-${_kernver}/drivers/media/dvb/dvb-core"
+  cp drivers/media/dvb/dvb-core/*.h "${pkgdir}/usr/src/linux-${_kernver}/drivers/media/dvb/dvb-core/"
+  # and...
+  # http://bugs.archlinux.org/task/11194
+  mkdir -p "${pkgdir}/usr/src/linux-${_kernver}/include/config/dvb/"
+  cp include/config/dvb/*.h "${pkgdir}/usr/src/linux-${_kernver}/include/config/dvb/"
+
+  # add dvb headers for http://mcentral.de/hg/~mrec/em28xx-new
+  # in reference to:
+  # http://bugs.archlinux.org/task/13146
+  mkdir -p "${pkgdir}/usr/src/linux-${_kernver}/drivers/media/dvb/frontends/"
+  cp drivers/media/dvb/frontends/lgdt330x.h "${pkgdir}/usr/src/linux-${_kernver}/drivers/media/dvb/frontends/"
+  cp drivers/media/video/msp3400-driver.h "${pkgdir}/usr/src/linux-${_kernver}/drivers/media/dvb/frontends/"
+
+  # add dvb headers
+  # in reference to:
+  # http://bugs.archlinux.org/task/20402
+  mkdir -p "${pkgdir}/usr/src/linux-${_kernver}/drivers/media/dvb/dvb-usb"
+  cp drivers/media/dvb/dvb-usb/*.h "${pkgdir}/usr/src/linux-${_kernver}/drivers/media/dvb/dvb-usb/"
+  mkdir -p "${pkgdir}/usr/src/linux-${_kernver}/drivers/media/dvb/frontends"
+  cp drivers/media/dvb/frontends/*.h "${pkgdir}/usr/src/linux-${_kernver}/drivers/media/dvb/frontends/"
+  mkdir -p "${pkgdir}/usr/src/linux-${_kernver}/drivers/media/common/tuners"
+  cp drivers/media/common/tuners/*.h "${pkgdir}/usr/src/linux-${_kernver}/drivers/media/common/tuners/"
+
+  # add xfs and shmem for aufs building
+  mkdir -p "${pkgdir}/usr/src/linux-${_kernver}/fs/xfs"
+  mkdir -p "${pkgdir}/usr/src/linux-${_kernver}/mm"
+  cp fs/xfs/xfs_sb.h "${pkgdir}/usr/src/linux-${_kernver}/fs/xfs/xfs_sb.h"
+
+  # copy in Kconfig files
+  for i in `find . -name "Kconfig*"`; do
+    mkdir -p "${pkgdir}"/usr/src/linux-${_kernver}/`echo ${i} | sed 's|/Kconfig.*||'`
+    cp ${i} "${pkgdir}/usr/src/linux-${_kernver}/${i}"
+  done
+
+  chown -R root.root "${pkgdir}/usr/src/linux-${_kernver}"
+  find "${pkgdir}/usr/src/linux-${_kernver}" -type d -exec chmod 755 {} \;
+
+  # strip scripts directory
+  find "${pkgdir}/usr/src/linux-${_kernver}/scripts" -type f -perm -u+w 2>/dev/null | while read binary ; do
+    case "$(file -bi "${binary}")" in
+      *application/x-sharedlib*) # Libraries (.so)
+        /usr/bin/strip ${STRIP_SHARED} "${binary}";;
+      *application/x-archive*) # Libraries (.a)
+        /usr/bin/strip ${STRIP_STATIC} "${binary}";;
+      *application/x-executable*) # Binaries
+        /usr/bin/strip ${STRIP_BINARIES} "${binary}";;
+    esac
+  done
+
+  # remove unneeded architectures
+  rm -rf "${pkgdir}"/usr/src/linux-${_kernver}/arch/{alpha,arm,arm26,avr32,blackfin,c6x,cris,frv,h8300,hexagon,ia64,m32r,m68k,m68knommu,mips,microblaze,mn10300,openrisc,parisc,powerpc,ppc,s390,score,sh,sh64,sparc,sparc64,tile,unicore32,um,v850,xtensa}
+}
+
+package_linux-lts34-docs() {
+  pkgdesc="Kernel hackers manual - HTML documentation that comes with the Linux kernel."
+
+  cd "${srcdir}/linux-${_basekernel}"
+
+  mkdir -p "${pkgdir}/usr/src/linux-${_kernver}"
+  cp -al Documentation "${pkgdir}/usr/src/linux-${_kernver}"
+  find "${pkgdir}" -type f -exec chmod 444 {} \;
+  find "${pkgdir}" -type d -exec chmod 755 {} \;
+
+  # remove a file already in linux package
+  rm -f "${pkgdir}/usr/src/linux-${_kernver}/Documentation/DocBook/Makefile"
+}
+
+# Needed for AUR.
+pkgdesc="The ${_pkgname} kernel and modules - 3.4 longterm stable kernel"
